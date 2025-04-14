@@ -1,0 +1,97 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from gym import Env, spaces
+from stable_baselines3 import PPO
+
+# -------- STEP 1: Simulated Dataset (replace with your real dataset) --------
+np.random.seed(42)
+n_samples = 500
+pitch = np.random.uniform(100, 200, n_samples)
+rate = np.random.uniform(2.0, 5.0, n_samples)
+intensity = np.random.uniform(50, 90, n_samples)
+
+# Simulated trust score (you can replace with real labels)
+trust_score = 0.3 * (pitch - 100)/100 + 0.5 * (rate - 2)/3 + 0.2 * (intensity - 50)/40 + np.random.normal(0, 0.05, n_samples)
+
+df = pd.DataFrame({
+    'pitch': pitch,
+    'rate': rate,
+    'intensity': intensity,
+    'trust_score': trust_score
+})
+
+# -------- STEP 2: Train Reward Model --------
+X = df[['pitch', 'rate', 'intensity']]
+y = df['trust_score']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+
+reward_model = RandomForestRegressor()
+reward_model.fit(X_train, y_train)
+
+# -------- STEP 3: Custom RL Environment --------
+class TrustFeatureEnv(Env):
+    def __init__(self, reward_model, feature_bounds):
+        super(TrustFeatureEnv, self).__init__()
+        self.reward_model = reward_model
+        self.low = feature_bounds[:, 0]
+        self.high = feature_bounds[:, 1]
+        self.action_space = spaces.Box(low=-0.1, high=0.1, shape=(3,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=self.low, high=self.high, dtype=np.float32)
+        self.state = None
+
+    def reset(self):
+        self.state = np.random.uniform(self.low, self.high)
+        return self.state
+
+    def step(self, action):
+        self.state = np.clip(self.state + action, self.low, self.high)
+        reward = self.reward_model.predict([self.state])[0]
+        done = False
+        return self.state, reward, done, {}
+
+feature_bounds = np.array([X['pitch'].min(), X['pitch'].max(),
+                           X['rate'].min(), X['rate'].max(),
+                           X['intensity'].min(), X['intensity'].max()]).reshape(3, 2)
+
+env = TrustFeatureEnv(reward_model, feature_bounds)
+
+# -------- STEP 4: Train PPO Agent --------
+model = PPO("MlpPolicy", env, verbose=1)
+rewards = []
+
+for i in range(50):
+    obs = env.reset()
+    total_reward = 0
+    for _ in range(10):
+        action, _ = model.predict(obs)
+        obs, reward, done, _ = env.step(action)
+        total_reward += reward
+    rewards.append(total_reward)
+
+# -------- STEP 5: Evaluate Top Outputs --------
+top_outputs = []
+for _ in range(100):
+    obs = env.reset()
+    action, _ = model.predict(obs)
+    new_state, reward, _, _ = env.step(action)
+    top_outputs.append((new_state, reward))
+
+# Sort and save results
+top_outputs_sorted = sorted(top_outputs, key=lambda x: -x[1])
+top_features_df = pd.DataFrame([{
+    'pitch': f[0], 'rate': f[1], 'intensity': f[2], 'predicted_trust_score': r
+} for f, r in top_outputs_sorted])
+
+top_features_df.to_csv("top_generated_features.csv", index=False)
+
+# -------- STEP 6: Plot Reward Curve --------
+plt.plot(rewards)
+plt.xlabel("Episode")
+plt.ylabel("Total Predicted Trust Score")
+plt.title("Predicted Trust Score over Training")
+plt.grid(True)
+plt.savefig("reward_curve.png")
+plt.show()
